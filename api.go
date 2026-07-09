@@ -8,8 +8,9 @@
 // requests below carry no scope selector — the agent IS the scope.
 package api
 
-// Version is the wire-contract version. Bump on any breaking change so an
-// older control plane and newer agent (or vice-versa) fail loud, not weird.
+// Version is the wire-contract version, surfaced in Info so a mismatched
+// control plane and agent are diagnosable. Agent and control plane are built
+// and released together, so this is a diagnostic, not a compatibility gate.
 const Version = "1"
 
 // Status mirrors the subset of `systemctl show` state Rookery surfaces. Field
@@ -34,7 +35,9 @@ type Unit struct {
 	Status  Status `json:"status"`
 }
 
-// Container is the `podman ps --all` subset the dashboard needs.
+// Container is the `podman ps --all` subset the dashboard needs. Health is the
+// container's healthcheck status ("healthy"/"unhealthy"/""), resolved by the
+// agent locally so the control plane needs no extra round trip.
 type Container struct {
 	ID      string            `json:"id"`
 	Names   []string          `json:"names"`
@@ -42,6 +45,7 @@ type Container struct {
 	State   string            `json:"state"`
 	IsInfra bool              `json:"isInfra"`
 	Labels  map[string]string `json:"labels"`
+	Health  string            `json:"health,omitempty"`
 }
 
 // Stat is one live resource sample for a running container.
@@ -105,7 +109,18 @@ const (
 	PathDaemonReload = "/v1/daemon-reload" // POST — reload this scope's units
 	// Lifecycle: POST /v1/units/{name}/{action} — ActionResult.
 	PathUnitsPrefix = "/v1/units/"
+	// Per-unit sub-resources under /v1/units/{name}/…:
+	//   GET  …/file  — raw Quadlet file contents (text/plain)
+	//   PUT  …/file  — write contents, then daemon-reload
+	//   GET  …/logs  — journal for the unit (text/plain); ?lines=N&since=…
+	SubFile = "/file"
+	SubLogs = "/logs"
 )
+
+// UnitFileURL / UnitLogsURL build the per-unit sub-resource paths so both
+// sides derive them the same way. name is the Quadlet file name.
+func UnitFileURL(name string) string { return PathUnitsPrefix + name + SubFile }
+func UnitLogsURL(name string) string { return PathUnitsPrefix + name + SubLogs }
 
 // HeaderAuth is the bearer-token header the agent requires on every
 // non-health request.
