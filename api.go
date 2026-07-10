@@ -91,6 +91,17 @@ type Stat struct {
 	MemBytes int64   `json:"memBytes"`
 }
 
+// Resource is one live podman network or volume in a scope, tagged whether a
+// Quadlet unit in that scope owns it (the agent computes managed itself, since
+// it has both the podman store and the unit files).
+type Resource struct {
+	Kind    string `json:"kind"` // "network" | "volume"
+	Name    string `json:"name"`
+	Driver  string `json:"driver,omitempty"`
+	Detail  string `json:"detail,omitempty"` // subnet for networks, mountpoint for volumes
+	Managed bool   `json:"managed"`
+}
+
 // ActionResult is returned by a lifecycle action (start/stop/...).
 type ActionResult struct {
 	Unit   string `json:"unit"`
@@ -128,6 +139,7 @@ const (
 	PathUnits        = "/v1/units"         // GET  — []Unit           ?scope=
 	PathContainers   = "/v1/containers"    // GET  — []Container      ?scope=
 	PathStats        = "/v1/stats"         // GET  — []Stat           ?scope=
+	PathResources    = "/v1/resources"     // GET  — []Resource       ?scope=
 	PathDaemonReload = "/v1/daemon-reload" // POST — reload scope's units ?scope=
 	// Lifecycle: POST /v1/units/{name}/{action}?scope=<id> — ActionResult.
 	PathUnitsPrefix = "/v1/units/"
