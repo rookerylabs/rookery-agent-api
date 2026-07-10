@@ -3,15 +3,50 @@
 // repos can import it without dragging in dependencies. One source of truth
 // for the JSON, so the two sides can never drift.
 //
-// An agent speaks for exactly ONE scope (its own systemd session + podman
-// socket). The control plane knows which agent maps to which scope, so the
-// requests below carry no scope selector — the agent IS the scope.
+// One agent runs per HOST (rootful) and serves EVERY scope on that host: the
+// system (rootful) manager plus each user's rootless session. The control
+// plane discovers the scopes via GET /v1/scopes, then selects one per request
+// with ?scope=<id>. So "one agent = one node", covering all of a host's
+// rootful and rootless containers.
 package api
 
-// Version is the wire-contract version, surfaced in Info so a mismatched
+// Version is the wire-contract version, surfaced in HostInfo so a mismatched
 // control plane and agent are diagnosable. Agent and control plane are built
 // and released together, so this is a diagnostic, not a compatibility gate.
 const Version = "1"
+
+// ScopeParam is the query-string key selecting which of a host's scopes a
+// request targets, e.g. /v1/units?scope=tobagin. Its value is a Scope.ID.
+const ScopeParam = "scope"
+
+// SystemScopeID is the Scope.ID of the rootful system manager. User scopes use
+// the username as their ID.
+const SystemScopeID = "system"
+
+// Scope is one systemd manager + podman store on the agent's host: the system
+// manager, or a single user's rootless session.
+type Scope struct {
+	ID                string `json:"id"`     // "system" or the username
+	Label             string `json:"label"`  // display name; "system" or the username
+	User              string `json:"user"`   // "" for the system scope
+	System            bool   `json:"system"` // true = rootful system manager
+	PodmanVersion     string `json:"podmanVersion"`
+	ContainersRunning int    `json:"containersRunning"`
+	ContainersTotal   int    `json:"containersTotal"`
+	// Error is set when the agent found the scope but could not query its
+	// podman (socket down, lingering off); the scope still lists so the node
+	// shows it, degraded rather than missing.
+	Error string `json:"error,omitempty"`
+}
+
+// HostInfo is GET /v1/scopes: the agent's host identity plus every scope it
+// manages. The control plane turns each Scope into a node area.
+type HostInfo struct {
+	Host         string  `json:"host"`
+	AgentVersion string  `json:"agentVersion"`
+	WireVersion  string  `json:"wireVersion"`
+	Scopes       []Scope `json:"scopes"`
+}
 
 // Status mirrors the subset of `systemctl show` state Rookery surfaces. Field
 // names and JSON tags match the control plane's systemd.UnitStatus exactly so
@@ -26,7 +61,7 @@ type Status struct {
 	Restarts int    `json:"restarts"` // NRestarts — a climbing value flags a restart loop
 }
 
-// Unit is one Quadlet unit in this scope, with its live systemd status.
+// Unit is one Quadlet unit in a scope, with its live systemd status.
 type Unit struct {
 	Name    string `json:"name"`    // file name, e.g. "ntfy.container"
 	Kind    string `json:"kind"`    // container|pod|network|volume|kube|image|build
@@ -56,20 +91,6 @@ type Stat struct {
 	MemBytes int64   `json:"memBytes"`
 }
 
-// Info identifies the scope this agent serves and its podman backend, so the
-// control plane can label the node and show host/version detail.
-type Info struct {
-	Scope             string `json:"scope"`   // human label, e.g. "user:tobagin"
-	User              string `json:"user"`    // "" for the system (rootful) scope
-	System            bool   `json:"system"`  // true = rootful system manager
-	Host              string `json:"host"`    // hostname the agent runs on
-	PodmanVersion     string `json:"podmanVersion"`
-	ContainersRunning int    `json:"containersRunning"`
-	ContainersTotal   int    `json:"containersTotal"`
-	AgentVersion      string `json:"agentVersion"`
-	WireVersion       string `json:"wireVersion"` // == Version above
-}
-
 // ActionResult is returned by a lifecycle action (start/stop/...).
 type ActionResult struct {
 	Unit   string `json:"unit"`
@@ -78,7 +99,7 @@ type ActionResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// Lifecycle actions accepted at POST {PathUnits}/{name}/{action}.
+// Lifecycle actions accepted at POST /v1/units/{name}/{action}?scope=<id>.
 const (
 	ActionStart   = "start"
 	ActionStop    = "stop"
@@ -98,27 +119,30 @@ func ValidAction(a string) bool {
 	return false
 }
 
-// HTTP endpoints. All are versioned under /v1; every request must carry
-// Authorization: Bearer <token>.
+// HTTP endpoints. All are versioned under /v1; every request but health must
+// carry Authorization: Bearer <token>. Every per-scope endpoint takes
+// ?scope=<Scope.ID>.
 const (
 	PathHealth       = "/v1/healthz"       // GET  — no auth, liveness only
-	PathInfo         = "/v1/info"          // GET  — Info
-	PathUnits        = "/v1/units"         // GET  — []Unit
-	PathContainers   = "/v1/containers"    // GET  — []Container
-	PathStats        = "/v1/stats"         // GET  — []Stat
-	PathDaemonReload = "/v1/daemon-reload" // POST — reload this scope's units
-	// Lifecycle: POST /v1/units/{name}/{action} — ActionResult.
+	PathScopes       = "/v1/scopes"        // GET  — HostInfo (host + all scopes)
+	PathUnits        = "/v1/units"         // GET  — []Unit           ?scope=
+	PathContainers   = "/v1/containers"    // GET  — []Container      ?scope=
+	PathStats        = "/v1/stats"         // GET  — []Stat           ?scope=
+	PathDaemonReload = "/v1/daemon-reload" // POST — reload scope's units ?scope=
+	// Lifecycle: POST /v1/units/{name}/{action}?scope=<id> — ActionResult.
 	PathUnitsPrefix = "/v1/units/"
-	// Per-unit sub-resources under /v1/units/{name}/…:
+	// Per-unit sub-resources under /v1/units/{name}/… (all ?scope=<id>):
 	//   GET  …/file  — raw Quadlet file contents (text/plain)
 	//   PUT  …/file  — write contents, then daemon-reload
+	//   DELETE …/file — remove file, then daemon-reload
 	//   GET  …/logs  — journal for the unit (text/plain); ?lines=N&since=…
 	SubFile = "/file"
 	SubLogs = "/logs"
 )
 
 // UnitFileURL / UnitLogsURL build the per-unit sub-resource paths so both
-// sides derive them the same way. name is the Quadlet file name.
+// sides derive them the same way. name is the Quadlet file name; callers
+// append ?scope=<id>.
 func UnitFileURL(name string) string { return PathUnitsPrefix + name + SubFile }
 func UnitLogsURL(name string) string { return PathUnitsPrefix + name + SubLogs }
 
