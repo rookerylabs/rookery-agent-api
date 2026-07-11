@@ -100,6 +100,35 @@ type Resource struct {
 	Driver  string `json:"driver,omitempty"`
 	Detail  string `json:"detail,omitempty"` // subnet for networks, mountpoint for volumes
 	Managed bool   `json:"managed"`
+	Used    bool   `json:"used"` // referenced by a container in the scope
+}
+
+// HostMetrics is GET /v1/metrics: a point-in-time snapshot of the agent host's
+// health, so an agent-backed node shows the same CPU/mem/load strip as a local
+// or ssh node. Field tags match the control plane's hostinfo.Metrics exactly so
+// it decodes straight through. CPUPct is -1 until the agent has two samples.
+type HostMetrics struct {
+	Hostname      string  `json:"hostname"`
+	Kernel        string  `json:"kernel"`
+	Load1         float64 `json:"load1"`
+	Cores         int     `json:"cores"`
+	CPUPct        int     `json:"cpuPct"`
+	MemTotalKB    int64   `json:"memTotalKb"`
+	MemAvailKB    int64   `json:"memAvailKb"`
+	UptimeSeconds int64   `json:"uptimeSeconds"`
+}
+
+// GPUDevice is one entry of GET /v1/gpus: a GPU on the agent's host. Tags match
+// the control plane's gpu.Device (minus Host, which the control plane fills in
+// with the node label). Unknown metrics are -1 so the UI tells "0%" from "can't
+// tell".
+type GPUDevice struct {
+	Index          int    `json:"index"`
+	Vendor         string `json:"vendor"` // nvidia, amd, intel
+	Name           string `json:"name"`
+	MemoryTotalMB  int    `json:"memoryTotalMb"`
+	MemoryUsedMB   int    `json:"memoryUsedMb"`
+	UtilizationPct int    `json:"utilizationPct"`
 }
 
 // ActionResult is returned by a lifecycle action (start/stop/...).
@@ -140,6 +169,8 @@ const (
 	PathContainers   = "/v1/containers"    // GET  — []Container      ?scope=
 	PathStats        = "/v1/stats"         // GET  — []Stat           ?scope=
 	PathResources    = "/v1/resources"     // GET  — []Resource       ?scope=
+	PathMetrics      = "/v1/metrics"       // GET  — HostMetrics (host-level, no scope)
+	PathGPUs         = "/v1/gpus"          // GET  — []GPUDevice  (host-level, no scope)
 	PathDaemonReload = "/v1/daemon-reload" // POST — reload scope's units ?scope=
 	// Lifecycle: POST /v1/units/{name}/{action}?scope=<id> — ActionResult.
 	PathUnitsPrefix = "/v1/units/"
